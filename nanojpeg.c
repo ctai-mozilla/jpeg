@@ -76,7 +76,7 @@
 //                           functions (default if compiling with MSVC and
 //                           NJ_USE_LIBC=0).
 // NJ_CHROMA_FILTER=1      = Use the bicubic chroma upsampling filter
-//                           (default).
+//                           (default). // 图像resize的一种算法
 // NJ_CHROMA_FILTER=0      = Use simple pixel repetition for chroma upsampling
 //                           (bad quality, but faster and less code).
 
@@ -212,13 +212,13 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     fseek(f, 0, SEEK_END);
-    size = (int) ftell(f);
+    size = (int) ftell(f); // 字节
     buf = malloc(size);
     fseek(f, 0, SEEK_SET);
-    size = (int) fread(buf, 1, size, f);
+    size = (int) fread(buf, 1, size, f); // 读取整个文件内容到buf
     fclose(f);
 
-    njInit();
+    njInit(); // 初始化nj_context_t
     if (njDecode(buf, size)) {
         printf("Error decoding the input file.\n");
         return 1;
@@ -238,6 +238,7 @@ int main(int argc, char* argv[]) {
 
 #endif
 
+// 解释什么是stride http://msdn.microsoft.com/en-us/library/windows/desktop/aa473780(v=vs.85).aspx
 
 ///////////////////////////////////////////////////////////////////////////////
 // IMPLEMENTATION SECTION                                                    //
@@ -290,32 +291,33 @@ typedef struct _nj_code {
 
 typedef struct _nj_cmp {
     int cid;
-    int ssx, ssy;
+    int ssx, ssy; // 水平/垂直因子
     int width, height;
     int stride;
-    int qtsel;
-    int actabsel, dctabsel;
+    int qtsel; // Quantization Table量化表
+    int actabsel, dctabsel; // AC/DC Huffman Table
     int dcpred;
     unsigned char *pixels;
-} nj_component_t;
+} nj_component_t; // 颜色分量
 
 typedef struct _nj_ctx {
     nj_result_t error;
-    const unsigned char *pos;
-    int size;
-    int length;
-    int width, height;
-    int mbwidth, mbheight;
-    int mbsizex, mbsizey;
-    int ncomp;
-    nj_component_t comp[3];
-    int qtused, qtavail;
-    unsigned char qtab[4][64];
-    nj_vlc_code_t vlctab[4][65536];
-    int buf, bufbits;
+    const unsigned char *pos; // 待解码数据指针(按字节来)
+    int size; // 整个数据的长度
+    int length; // 某一个marker内容的长度
+    int width, height; // 图片宽和高度
+    int mbwidth, mbheight; // MCU水平/垂直个数
+    int mbsizex, mbsizey; // MCU宽/高
+    int ncomp; // 颜色分量数
+    nj_component_t comp[3]; // YCbCr
+    int qtused, qtavail; // 这两个目前看不出来很大用处
+    unsigned char qtab[4][64]; // 但是目前似乎只有2个
+    nj_vlc_code_t vlctab[4][65536]; // 构造所有16位数的Huffman基数
+									// 目前基本上是4个(直/交/0/1)
+    int buf, bufbits; // 这是用来做什么的 buf是存放内容的 bufbits是计数器，存放了多少个bits
     int block[64];
     int rstinterval;
-    unsigned char *rgb;
+    unsigned char *rgb; // 解析出来的RGB所要占用的内存 // 每1个点包含3个字节，按找RGB的顺序
 } nj_context_t;
 
 static nj_context_t nj;
@@ -324,8 +326,25 @@ static const char njZZ[64] = { 0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18,
 11, 4, 5, 12, 19, 26, 33, 40, 48, 41, 34, 27, 20, 13, 6, 7, 14, 21, 28, 35,
 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51, 58, 59, 52, 45,
 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63 };
+/*
+0   1   2   3   4   5   6   7
 
-NJ_FORCE_INLINE unsigned char njClip(const int x) {
+8   9   10  11  12  13  14  15
+
+16  17  18  19  20  21  22  23
+
+24  25  26  27  28  29  30  31
+
+32  33  34  35  36  37  38  39
+
+40  41  42  43  44  45  46  47
+
+48  49  50  51  52  53  54  55
+
+56  57  58  59  60  61  62  63
+*/
+
+NJ_FORCE_INLINE unsigned char njClip(const int x) { // 限定范围是0 ~ 255之间
     return (x < 0) ? 0 : ((x > 0xFF) ? 0xFF : (unsigned char) x);
 }
 
@@ -336,7 +355,7 @@ NJ_FORCE_INLINE unsigned char njClip(const int x) {
 #define W6 1108
 #define W7 565
 
-NJ_INLINE void njRowIDCT(int* blk) {
+NJ_INLINE void njRowIDCT(int* blk) { // 按行来操作的 0 ~ 7 // 8 ~ 15
     int x0, x1, x2, x3, x4, x5, x6, x7, x8;
     if (!((x1 = blk[4] << 11)
         | (x2 = blk[6])
@@ -418,7 +437,7 @@ NJ_INLINE void njColIDCT(const int* blk, unsigned char *out, int stride) {
     x8 -= x3;
     x3 = x0 + x2;
     x0 -= x2;
-    x2 = (181 * (x4 + x5) + 128) >> 8;
+    x2 = (181 * (x4 + x5) + 128) >> 8; // Y，Cb和Cr的值都范围都是-128 ~ 127，并且在FDCT的时候有先减去128，所以现在要IDCT之后再加上128
     x4 = (181 * (x4 - x5) + 128) >> 8;
     *out = njClip(((x7 + x1) >> 14) + 128);  out += stride;
     *out = njClip(((x3 + x2) >> 14) + 128);  out += stride;
@@ -433,19 +452,19 @@ NJ_INLINE void njColIDCT(const int* blk, unsigned char *out, int stride) {
 #define njThrow(e) do { nj.error = e; return; } while (0)
 #define njCheckError() do { if (nj.error) return; } while (0)
 
-static int njShowBits(int bits) {
+static int njShowBits(int bits) { // 能放得下大于32位的值么？
     unsigned char newbyte;
     if (!bits) return 0;
-    while (nj.bufbits < bits) {
+    while (nj.bufbits < bits) { // 也就是说要buf的位数小于已经buf的位数的时候，就直接读出来？
         if (nj.size <= 0) {
             nj.buf = (nj.buf << 8) | 0xFF;
             nj.bufbits += 8;
             continue;
         }
-        newbyte = *nj.pos++;
+        newbyte = *nj.pos++; // 数据指针是按字节
         nj.size--;
         nj.bufbits += 8;
-        nj.buf = (nj.buf << 8) | newbyte;
+        nj.buf = (nj.buf << 8) | newbyte; // 高位最终会被覆盖掉，比如我要buf一个64位的值怎么办？
         if (newbyte == 0xFF) {
             if (nj.size) {
                 unsigned char marker = *nj.pos++;
@@ -483,23 +502,23 @@ NJ_INLINE int njGetBits(int bits) {
 }
 
 NJ_INLINE void njByteAlign(void) {
-    nj.bufbits &= 0xF8;
+    nj.bufbits &= 0xF8; // (1111 1000)8的倍数，不满8的部分丢弃
 }
 
 static void njSkip(int count) {
-    nj.pos += count;
-    nj.size -= count;
-    nj.length -= count;
+    nj.pos += count; // 数据指针增加
+    nj.size -= count; // 总体数据大小减去count
+    nj.length -= count; // 当前marker长度减去count
     if (nj.size < 0) nj.error = NJ_SYNTAX_ERROR;
 }
 
 NJ_INLINE unsigned short njDecode16(const unsigned char *pos) {
-    return (pos[0] << 8) | pos[1];
+    return (pos[0] << 8) | pos[1]; // 00000000 00001101
 }
 
-static void njDecodeLength(void) {
+static void njDecodeLength(void) { // decode长度字段，这个方法调用一般都是已经进入到特定的marker之后
     if (nj.size < 2) njThrow(NJ_SYNTAX_ERROR);
-    nj.length = njDecode16(nj.pos);
+    nj.length = njDecode16(nj.pos); // 该marker的长度(除去marker名字所占用的2个字节)
     if (nj.length > nj.size) njThrow(NJ_SYNTAX_ERROR);
     njSkip(2);
 }
@@ -509,53 +528,64 @@ NJ_INLINE void njSkipMarker(void) {
     njSkip(nj.length);
 }
 
-NJ_INLINE void njDecodeSOF(void) {
+NJ_INLINE void njDecodeSOF(void) { // 解析Start of Frame的时候就会把所需要的内存都分配好
     int i, ssxmax = 0, ssymax = 0;
     nj_component_t* c;
-    njDecodeLength();
+    njDecodeLength(); // 解析长度并移动数据指针
     if (nj.length < 9) njThrow(NJ_SYNTAX_ERROR);
-    if (nj.pos[0] != 8) njThrow(NJ_UNSUPPORTED);
-    nj.height = njDecode16(nj.pos+1);
-    nj.width = njDecode16(nj.pos+3);
-    nj.ncomp = nj.pos[5];
-    njSkip(6);
-    switch (nj.ncomp) {
+    if (nj.pos[0] != 8) njThrow(NJ_UNSUPPORTED); // 样本精度，一般都是8
+    nj.height = njDecode16(nj.pos + 1); // 图片高度/宽度
+    nj.width = njDecode16(nj.pos + 3);
+    nj.ncomp = nj.pos[5]; // 颜色分量数据，一般都是3
+    njSkip(6); // 之前共6个字节数据，所以移动数据指针6个字节
+    switch (nj.ncomp) { // 目前只支持1和3这两种
         case 1:
         case 3:
             break;
         default:
             njThrow(NJ_UNSUPPORTED);
     }
-    if (nj.length < (nj.ncomp * 3)) njThrow(NJ_SYNTAX_ERROR);
+    if (nj.length < (nj.ncomp * 3)) njThrow(NJ_SYNTAX_ERROR); // 数据量肯定是要大于颜色分量数 multiply 3，因为接着存颜色分量信息的每个结构占3个字节
+															  // 颜色分量ID占用1个字节，水平/垂直因子占用1个字节(高4位水平，低4位垂直)，量化表占用1个字节
     for (i = 0, c = nj.comp;  i < nj.ncomp;  ++i, ++c) {
-        c->cid = nj.pos[0];
-        if (!(c->ssx = nj.pos[1] >> 4)) njThrow(NJ_SYNTAX_ERROR);
+        c->cid = nj.pos[0]; // 颜色分量ID
+        if (!(c->ssx = nj.pos[1] >> 4)) njThrow(NJ_SYNTAX_ERROR); // 高4位(水平因子)
         if (c->ssx & (c->ssx - 1)) njThrow(NJ_UNSUPPORTED);  // non-power of two
-        if (!(c->ssy = nj.pos[1] & 15)) njThrow(NJ_SYNTAX_ERROR);
+        if (!(c->ssy = nj.pos[1] & 15)) njThrow(NJ_SYNTAX_ERROR); // (00001111)低4位(垂直因子)
         if (c->ssy & (c->ssy - 1)) njThrow(NJ_UNSUPPORTED);  // non-power of two
-        if ((c->qtsel = nj.pos[2]) & 0xFC) njThrow(NJ_SYNTAX_ERROR);
-        njSkip(3);
-        nj.qtused |= 1 << c->qtsel;
-        if (c->ssx > ssxmax) ssxmax = c->ssx;
-        if (c->ssy > ssymax) ssymax = c->ssy;
+        if ((c->qtsel = nj.pos[2]) & 0xFC) njThrow(NJ_SYNTAX_ERROR); // (11111101) 这里0xFC是用在这里干什么的？
+        njSkip(3); // 移动数据指针到下一个颜色分量
+        nj.qtused |= 1 << c->qtsel; // 这里是做什么用的？看不出来
+        if (c->ssx > ssxmax) ssxmax = c->ssx; // 记录最大水平因子
+        if (c->ssy > ssymax) ssymax = c->ssy; // 记录最大垂直因子
     }
-    if (nj.ncomp == 1) {
+    if (nj.ncomp == 1) { // 只有一种颜色分量的时候就简单啦
         c = nj.comp;
         c->ssx = c->ssy = ssxmax = ssymax = 1;
     }
-    nj.mbsizex = ssxmax << 3;
-    nj.mbsizey = ssymax << 3;
-    nj.mbwidth = (nj.width + nj.mbsizex - 1) / nj.mbsizex;
-    nj.mbheight = (nj.height + nj.mbsizey - 1) / nj.mbsizey;
+    nj.mbsizex = ssxmax << 3; // MCU宽 是 水平采样因子最大值 multiply 8
+    nj.mbsizey = ssymax << 3; // MCU高 是 垂直采样因子最大值 multiply 8
+    nj.mbwidth = (nj.width + nj.mbsizex - 1) / nj.mbsizex; // 分子采用+ nj.mbsizex - 1就取到大于但是最接近(等于)宽度的值，
+														   // 并且这个值是MCU宽度整数倍 // 这里是水平方向MCU的个数
+    nj.mbheight = (nj.height + nj.mbsizey - 1) / nj.mbsizey; // 这里是垂直方向MCU的个数
     for (i = 0, c = nj.comp;  i < nj.ncomp;  ++i, ++c) {
-        c->width = (nj.width * c->ssx + ssxmax - 1) / ssxmax;
-        c->stride = (c->width + 7) & 0x7FFFFFF8;
+        c->width = (nj.width * c->ssx + ssxmax - 1) / ssxmax; // 采样宽度？ 最大水平/垂直因子的值就是图片原来的值，否则就会根据因子做相应的减少
+        c->stride = (c->width + 7) & 0x7FFFFFF8; // (0111 1111 1111 1111 1111 1111 1111 1000) 做什么？以1234567结尾的都省略掉？
+												 // 变成8的整数
+												 // 补齐8位，注意前面有加7，所以总是不会比原来的少，比如原来是227，那么这里就会变成232
+												 // 这是按照数据单元计算的，所以不对
+		printf("%d, stride %d\n", i, c->stride);
         c->height = (nj.height * c->ssy + ssymax - 1) / ssymax;
-        c->stride = nj.mbwidth * nj.mbsizex * c->ssx / ssxmax;
+        c->stride = nj.mbwidth * nj.mbsizex * c->ssx / ssxmax; // 再计算一遍stride有什么用？前面计算的是错误的，没有考虑MCU宽度
+															   // 这里都已经是round过的了，所以直接计算
+		printf("%d, stride again %d\n", i, c->stride);
         if (((c->width < 3) && (c->ssx != ssxmax)) || ((c->height < 3) && (c->ssy != ssymax))) njThrow(NJ_UNSUPPORTED);
-        if (!(c->pixels = njAllocMem(c->stride * (nj.mbheight * nj.mbsizey * c->ssy / ssymax)))) njThrow(NJ_OUT_OF_MEM);
+        if (!(c->pixels = njAllocMem(c->stride * (nj.mbheight * nj.mbsizey * c->ssy / ssymax)))) njThrow(NJ_OUT_OF_MEM); // 为分量分配内存
+																														 // 大小是所有MCU的
+																														 // 可能比图片实际
+																														 // 尺寸大
     }
-    if (nj.ncomp == 3) {
+    if (nj.ncomp == 3) { // 只有有3个颜色分量的时候才需要
         nj.rgb = njAllocMem(nj.width * nj.height * nj.ncomp);
         if (!nj.rgb) njThrow(NJ_OUT_OF_MEM);
     }
@@ -565,30 +595,31 @@ NJ_INLINE void njDecodeSOF(void) {
 NJ_INLINE void njDecodeDHT(void) {
     int codelen, currcnt, remain, spread, i, j;
     nj_vlc_code_t *vlc;
-    static unsigned char counts[16];
+    static unsigned char counts[16]; // 码字
     njDecodeLength();
-    while (nj.length >= 17) {
-        i = nj.pos[0];
-        if (i & 0xEC) njThrow(NJ_SYNTAX_ERROR);
-        if (i & 0x02) njThrow(NJ_UNSUPPORTED);
+    while (nj.length >= 17) { // 码字的数量(16) + 类型和ID(1)
+        i = nj.pos[0]; // 类型和ID
+        if (i & 0xEC) njThrow(NJ_SYNTAX_ERROR); // (11101100)
+        if (i & 0x02) njThrow(NJ_UNSUPPORTED); // (00000010)
         i = (i | (i >> 3)) & 3;  // combined DC/AC + tableid value
-        for (codelen = 1;  codelen <= 16;  ++codelen)
-            counts[codelen - 1] = nj.pos[codelen];
+								 // 直流0，直流1，交流0，交流1
+        for (codelen = 1;  codelen <= 16;  ++codelen) // 码字长度
+            counts[codelen - 1] = nj.pos[codelen]; // 读取码字
         njSkip(17);
         vlc = &nj.vlctab[i][0];
         remain = spread = 65536;
         for (codelen = 1;  codelen <= 16;  ++codelen) {
-            spread >>= 1;
+            spread >>= 1; // 干什么？
             currcnt = counts[codelen - 1];
-            if (!currcnt) continue;
+            if (!currcnt) continue; // 如果该位数没有码字
             if (nj.length < currcnt) njThrow(NJ_SYNTAX_ERROR);
             remain -= currcnt << (16 - codelen);
             if (remain < 0) njThrow(NJ_SYNTAX_ERROR);
-            for (i = 0;  i < currcnt;  ++i) {
+            for (i = 0;  i < currcnt;  ++i) { // 码字个数，同样位数的码字可以有多个
                 register unsigned char code = nj.pos[i];
-                for (j = spread;  j;  --j) {
-                    vlc->bits = (unsigned char) codelen;
-                    vlc->code = code;
+                for (j = spread;  j;  --j) { // 保存这么多个有什么作用？
+                    vlc->bits = (unsigned char) codelen; // 码字位数
+                    vlc->code = code; // 码字值
                     ++vlc;
                 }
             }
@@ -607,12 +638,12 @@ NJ_INLINE void njDecodeDQT(void) {
     unsigned char *t;
     njDecodeLength();
     while (nj.length >= 65) {
-        i = nj.pos[0];
-        if (i & 0xFC) njThrow(NJ_SYNTAX_ERROR);
-        nj.qtavail |= 1 << i;
+        i = nj.pos[0]; // QT信息，高4位为QT精度，低4位为QT号
+        if (i & 0xFC) njThrow(NJ_SYNTAX_ERROR); // (1111 1110)这个用来检测QT号码是否正确的吗？目前精度好像都为0，所以这么写？
+        nj.qtavail |= 1 << i; // XXX 直接通过这里转换为数量？
         t = &nj.qtab[i][0];
         for (i = 0;  i < 64;  ++i)
-            t[i] = nj.pos[i + 1];
+            t[i] = nj.pos[i + 1]; // 读取到QT数组当中，但应该还是按照文件流当中的排列
         njSkip(65);
     }
     if (nj.length) njThrow(NJ_SYNTAX_ERROR);
@@ -625,7 +656,7 @@ NJ_INLINE void njDecodeDRI(void) {
     njSkip(nj.length);
 }
 
-static int njGetVLC(nj_vlc_code_t* vlc, unsigned char* code) {
+static int njGetVLC(nj_vlc_code_t* vlc, unsigned char* code) { // Variable Length Coding
     int value = njShowBits(16);
     int bits = vlc[value].bits;
     if (!bits) { nj.error = NJ_SYNTAX_ERROR; return 0; }
@@ -644,18 +675,18 @@ NJ_INLINE void njDecodeBlock(nj_component_t* c, unsigned char* out) {
     unsigned char code = 0;
     int value, coef = 0;
     njFillMem(nj.block, 0, sizeof(nj.block));
-    c->dcpred += njGetVLC(&nj.vlctab[c->dctabsel][0], NULL);
-    nj.block[0] = (c->dcpred) * nj.qtab[c->qtsel][0];
+    c->dcpred += njGetVLC(&nj.vlctab[c->dctabsel][0], NULL); // DC 0/1 不会和AC重复
+    nj.block[0] = (c->dcpred) * nj.qtab[c->qtsel][0]; // DC // 这里是反量化？
     do {
-        value = njGetVLC(&nj.vlctab[c->actabsel][0], &code);
+        value = njGetVLC(&nj.vlctab[c->actabsel][0], &code); // DC 2/3
         if (!code) break;  // EOB
         if (!(code & 0x0F) && (code != 0xF0)) njThrow(NJ_SYNTAX_ERROR);
-        coef += (code >> 4) + 1;
+        coef += (code >> 4) + 1; // coefficient 系数
         if (coef > 63) njThrow(NJ_SYNTAX_ERROR);
-        nj.block[(int) njZZ[coef]] = value * nj.qtab[c->qtsel][coef];
+        nj.block[(int) njZZ[coef]] = value * nj.qtab[c->qtsel][coef]; // AC 这里是反量化？
     } while (coef < 63);
     for (coef = 0;  coef < 64;  coef += 8)
-        njRowIDCT(&nj.block[coef]);
+        njRowIDCT(&nj.block[coef]); // 上面先Huffman解码/反量化，这里行(反DCT)
     for (coef = 0;  coef < 8;  ++coef)
         njColIDCT(&nj.block[coef], &out[coef], c->stride);
 }
@@ -667,28 +698,35 @@ NJ_INLINE void njDecodeScan(void) {
     njDecodeLength();
     if (nj.length < (4 + 2 * nj.ncomp)) njThrow(NJ_SYNTAX_ERROR);
     if (nj.pos[0] != nj.ncomp) njThrow(NJ_UNSUPPORTED);
-    njSkip(1);
+    njSkip(1); // 颜色分量数量
     for (i = 0, c = nj.comp;  i < nj.ncomp;  ++i, ++c) {
-        if (nj.pos[0] != c->cid) njThrow(NJ_SYNTAX_ERROR);
+        if (nj.pos[0] != c->cid) njThrow(NJ_SYNTAX_ERROR); // 颜色分量ID
         if (nj.pos[1] & 0xEE) njThrow(NJ_SYNTAX_ERROR);
-        c->dctabsel = nj.pos[1] >> 4;
-        c->actabsel = (nj.pos[1] & 1) | 2;
+        c->dctabsel = nj.pos[1] >> 4; // 高4位为直流表DC Table
+        c->actabsel = (nj.pos[1] & 1) | 2; // 低4位为交流表AC Table(这里有做特殊处理，所以AC的表名不会和DC相同)
+
+		printf("DC/AC Huffman table ids: %d/%d\n", c->dctabsel, c->actabsel);	
+
         njSkip(2);
     }
     if (nj.pos[0] || (nj.pos[1] != 63) || nj.pos[2]) njThrow(NJ_UNSUPPORTED);
-    njSkip(nj.length);
+    njSkip(nj.length); // 忽略3个字节 通常为 00 3F 00
+					   // 2 + 1 + 6 + 3为12字节，这个marker的长度刚好为12字节
+					   // 接下来都是编码过的图像数据
     for (mbx = mby = 0;;) {
-        for (i = 0, c = nj.comp;  i < nj.ncomp;  ++i, ++c)
-            for (sby = 0;  sby < c->ssy;  ++sby)
+        for (i = 0, c = nj.comp;  i < nj.ncomp;  ++i, ++c) // 每个分量都要decode
+            for (sby = 0;  sby < c->ssy;  ++sby) // 水平/垂直因子
                 for (sbx = 0;  sbx < c->ssx;  ++sbx) {
-                    njDecodeBlock(c, &c->pixels[((mby * c->ssy + sby) * c->stride + mbx * c->ssx + sbx) << 3]);
+                    njDecodeBlock(c, &c->pixels[((mby * c->ssy + sby) * c->stride + mbx * c->ssx + sbx) << 3]); // 读取原始编码过
+																												// 的图片数据到block中
+																												// 并反量化，反离散余弦变换
                     njCheckError();
                 }
-        if (++mbx >= nj.mbwidth) {
+        if (++mbx >= nj.mbwidth) { // 读完所有的MCU，到达最右就返回从下一行开始
             mbx = 0;
-            if (++mby >= nj.mbheight) break;
+            if (++mby >= nj.mbheight) break; // 到达最底行的时候推出，decode结束
         }
-        if (nj.rstinterval && !(--rstcount)) {
+        if (nj.rstinterval && !(--rstcount)) { // restart marker
             njByteAlign();
             i = njGetBits(16);
             if (((i & 0xFFF8) != 0xFFD0) || ((i & 7) != nextrst)) njThrow(NJ_SYNTAX_ERROR);
@@ -717,7 +755,11 @@ NJ_INLINE void njDecodeScan(void) {
 #define CF2B (-11)
 #define CF(x) njClip(((x) + 64) >> 7)
 
+// 通常我们放大图片的时候就需要upsampling，缩小的时候就downsampling，通称为resampling
+// 这里Cb/Cr分量的会少些，所以需要upsampling
+
 NJ_INLINE void njUpsampleH(nj_component_t* c) {
+	printf("njUpsampleH %d\n", c->cid);
     const int xmax = c->width - 3;
     unsigned char *out, *lin, *lout;
     int x, y;
@@ -746,6 +788,7 @@ NJ_INLINE void njUpsampleH(nj_component_t* c) {
 }
 
 NJ_INLINE void njUpsampleV(nj_component_t* c) {
+	printf("njUpsampleV %d\n", c->cid);
     const int w = c->width, s1 = c->stride, s2 = s1 + s1;
     unsigned char *out, *cin, *cout;
     int x, y;
@@ -777,11 +820,12 @@ NJ_INLINE void njUpsampleV(nj_component_t* c) {
 #else
 
 NJ_INLINE void njUpsample(nj_component_t* c) {
+	printf("njUpsample %d\n", c->cid);
     int x, y, xshift = 0, yshift = 0;
     unsigned char *out, *lin, *lout;
     while (c->width < nj.width) { c->width <<= 1; ++xshift; }
     while (c->height < nj.height) { c->height <<= 1; ++yshift; }
-    out = njAllocMem(c->width * c->height);
+    out = njAllocMem(c->width * c->height); // 放大后的尺寸
     if (!out) njThrow(NJ_OUT_OF_MEM);
     lin = c->pixels;
     lout = out;
@@ -801,7 +845,7 @@ NJ_INLINE void njUpsample(nj_component_t* c) {
 NJ_INLINE void njConvert() {
     int i;
     nj_component_t* c;
-    for (i = 0, c = nj.comp;  i < nj.ncomp;  ++i, ++c) {
+    for (i = 0, c = nj.comp;  i < nj.ncomp;  ++i, ++c) { // 如果需要的话就upsampling
         #if NJ_CHROMA_FILTER
             while ((c->width < nj.width) || (c->height < nj.height)) {
                 if (c->width < nj.width) njUpsampleH(c);
@@ -815,27 +859,28 @@ NJ_INLINE void njConvert() {
         #endif
         if ((c->width < nj.width) || (c->height < nj.height)) njThrow(NJ_INTERNAL_ERR);
     }
-    if (nj.ncomp == 3) {
+    if (nj.ncomp == 3) { // SEE njGetImage()
         // convert to RGB
         int x, yy;
         unsigned char *prgb = nj.rgb;
         const unsigned char *py  = nj.comp[0].pixels;
         const unsigned char *pcb = nj.comp[1].pixels;
         const unsigned char *pcr = nj.comp[2].pixels;
-        for (yy = nj.height;  yy;  --yy) {
-            for (x = 0;  x < nj.width;  ++x) {
-                register int y = py[x] << 8;
-                register int cb = pcb[x] - 128;
+		// 多余的数据(编/解码是对齐用的)会被丢弃吗？
+        for (yy = nj.height;  yy;  --yy) { // 列
+            for (x = 0;  x < nj.width;  ++x) { // 行
+                register int y = py[x] << 8; // 这是为什么？ 色彩空间转换公式计算需要
+                register int cb = pcb[x] - 128; // YCbCr的Cb和Cr一般都是有符号数，但是在JPEG当中都是无符号数
                 register int cr = pcr[x] - 128;
-                *prgb++ = njClip((y            + 359 * cr + 128) >> 8);
+                *prgb++ = njClip((y            + 359 * cr + 128) >> 8); // 色彩空间转换，YCbCr到RGB
                 *prgb++ = njClip((y -  88 * cb - 183 * cr + 128) >> 8);
                 *prgb++ = njClip((y + 454 * cb            + 128) >> 8);
             }
-            py += nj.comp[0].stride;
+            py += nj.comp[0].stride; // 移动YCbCr数据指针，每一行都是有stride的，所以当需要的数据都得到时，后面的就不管，直接丢弃，移动到下一行
             pcb += nj.comp[1].stride;
             pcr += nj.comp[2].stride;
         }
-    } else if (nj.comp[0].width != nj.comp[0].stride) {
+    } else if (nj.comp[0].width != nj.comp[0].stride) { // 如果宽度和stride都一样，什么都不用做
         // grayscale -> only remove stride
         unsigned char *pin = &nj.comp[0].pixels[nj.comp[0].stride];
         unsigned char *pout = &nj.comp[0].pixels[nj.comp[0].width];
@@ -850,7 +895,7 @@ NJ_INLINE void njConvert() {
 }
 
 void njInit(void) {
-    njFillMem(&nj, 0, sizeof(nj_context_t));
+    njFillMem(&nj, 0, sizeof(nj_context_t)); // 初始化nj_context_t
 }
 
 void njDone(void) {
@@ -864,13 +909,13 @@ void njDone(void) {
 nj_result_t njDecode(const void* jpeg, const int size) {
     njDone();
     nj.pos = (const unsigned char*) jpeg;
-    nj.size = size & 0x7FFFFFFF;
+    nj.size = size & 0x7FFFFFFF; // ？
     if (nj.size < 2) return NJ_NO_JPEG;
-    if ((nj.pos[0] ^ 0xFF) | (nj.pos[1] ^ 0xD8)) return NJ_NO_JPEG;
+    if ((nj.pos[0] ^ 0xFF) | (nj.pos[1] ^ 0xD8)) return NJ_NO_JPEG; // 不以0xFFD8打头(为什么要用异或来判断？)
     njSkip(2);
-    while (!nj.error) {
-        if ((nj.size < 2) || (nj.pos[0] != 0xFF)) return NJ_SYNTAX_ERROR;
-        njSkip(2);
+    while (!nj.error) { // 有“错误”的时候离开
+        if ((nj.size < 2) || (nj.pos[0] != 0xFF)) return NJ_SYNTAX_ERROR; // 太小，或者不以0xFF打头
+        njSkip(2); // 移动到标签的后面(长度字段的前面)
         switch (nj.pos[-1]) {
             case 0xC0: njDecodeSOF();  break;
             case 0xC4: njDecodeDHT();  break;
@@ -879,7 +924,7 @@ nj_result_t njDecode(const void* jpeg, const int size) {
             case 0xDA: njDecodeScan(); break;
             case 0xFE: njSkipMarker(); break;
             default:
-                if ((nj.pos[-1] & 0xF0) == 0xE0)
+                if ((nj.pos[-1] & 0xF0) == 0xE0) // JPG0和APP0字段，目前都忽略
                     njSkipMarker();
                 else
                     return NJ_UNSUPPORTED;
@@ -894,7 +939,7 @@ nj_result_t njDecode(const void* jpeg, const int size) {
 int njGetWidth(void)            { return nj.width; }
 int njGetHeight(void)           { return nj.height; }
 int njIsColor(void)             { return (nj.ncomp != 1); }
-unsigned char* njGetImage(void) { return (nj.ncomp == 1) ? nj.comp[0].pixels : nj.rgb; }
+unsigned char* njGetImage(void) { return (nj.ncomp == 1) ? nj.comp[0].pixels : nj.rgb; } // 一/三个分量
 int njGetImageSize(void)        { return nj.width * nj.height * nj.ncomp; }
 
 #endif // _NJ_INCLUDE_HEADER_ONLY
