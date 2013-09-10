@@ -296,7 +296,7 @@ typedef struct _nj_cmp {
     int stride;
     int qtsel; // Quantization Table量化表
     int actabsel, dctabsel; // AC/DC Huffman Table
-    int dcpred;
+    int dcpred; // DC prediction
     unsigned char *pixels;
 } nj_component_t; // 颜色分量
 
@@ -326,6 +326,7 @@ static const char njZZ[64] = { 0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18,
 11, 4, 5, 12, 19, 26, 33, 40, 48, 41, 34, 27, 20, 13, 6, 7, 14, 21, 28, 35,
 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51, 58, 59, 52, 45,
 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63 };
+
 /*
 0   1   2   3   4   5   6   7
 
@@ -592,6 +593,15 @@ NJ_INLINE void njDecodeSOF(void) { // 解析Start of Frame的时候就会把所�
     njSkip(nj.length);
 }
 
+static void njPrintHT(int id) {
+	nj_vlc_code_t *vlc = &nj.vlctab[id][0];
+	int nt = 0;
+	while (nt++ <= 65535) {
+		printf("id %d, round %d bits %d, code %d\n", id, nt, vlc->bits, vlc->code);
+		vlc++;
+	}
+}
+
 NJ_INLINE void njDecodeDHT(void) {
     int codelen, currcnt, remain, spread, i, j;
     nj_vlc_code_t *vlc;
@@ -604,32 +614,39 @@ NJ_INLINE void njDecodeDHT(void) {
         i = (i | (i >> 3)) & 3;  // combined DC/AC + tableid value
 								 // 直流0，直流1，交流0，交流1
         for (codelen = 1;  codelen <= 16;  ++codelen) // 码字长度
-            counts[codelen - 1] = nj.pos[codelen]; // 读取码字
+            counts[codelen - 1] = nj.pos[codelen]; // 读取码字 DHT 当中的16个字节 00 01 05 01 01 01 01 01 01 00 00 00 00 00 00 00
         njSkip(17);
+		int tblid = i;
         vlc = &nj.vlctab[i][0];
         remain = spread = 65536;
         for (codelen = 1;  codelen <= 16;  ++codelen) {
-            spread >>= 1; // 干什么？
+            spread >>= 1; // 干什么？ // 65536 >> 16 = 1 每个category所包含的编码个数
             currcnt = counts[codelen - 1];
             if (!currcnt) continue; // 如果该位数没有码字
             if (nj.length < currcnt) njThrow(NJ_SYNTAX_ERROR);
-            remain -= currcnt << (16 - codelen);
+            remain -= currcnt << (16 - codelen); // 干什么？ 计算当前size的码字占用多少VLC表的空间，得到剩下的空间
             if (remain < 0) njThrow(NJ_SYNTAX_ERROR);
             for (i = 0;  i < currcnt;  ++i) { // 码字个数，同样位数的码字可以有多个
-                register unsigned char code = nj.pos[i];
+                register unsigned char code = nj.pos[i]; // 有多少个就，读多少个字节
                 for (j = spread;  j;  --j) { // 保存这么多个有什么作用？
                     vlc->bits = (unsigned char) codelen; // 码字位数
-                    vlc->code = code; // 码字值
+                    vlc->code = code; // 码字值(这个读取出来的到底是什么？00 01 02 03 04 05 06 07 08 09 0A 0B，是值，还是权重？)
                     ++vlc;
                 }
             }
             njSkip(currcnt);
         }
-        while (remain--) {
+        while (remain--) { // 16位都填充完成，剩下的就用0填(1位码字XX个，2位码字XX个，...)
+//			printf("i'm nothing vlc id %d\n", tblid);
             vlc->bits = 0;
             ++vlc;
         }
+
+		// for debug
+//		printf("Huffman vlc id %d\n", tblid);
+//		njPrintHT(tblid);
     }
+
     if (nj.length) njThrow(NJ_SYNTAX_ERROR);
 }
 
@@ -657,30 +674,38 @@ NJ_INLINE void njDecodeDRI(void) {
 }
 
 static int njGetVLC(nj_vlc_code_t* vlc, unsigned char* code) { // Variable Length Coding
-    int value = njShowBits(16);
+    int value = njShowBits(16); // 为什么是2个字节？ 这又是什么？ 或许是这里的Huffman编码的码字永远是少于16位的
     int bits = vlc[value].bits;
+	printf("vlc value %d, bits %d ", value, bits);
     if (!bits) { nj.error = NJ_SYNTAX_ERROR; return 0; }
     njSkipBits(bits);
     value = vlc[value].code;
+	printf("code %d ", value);
     if (code) *code = (unsigned char) value;
-    bits = value & 15;
-    if (!bits) return 0;
-    value = njGetBits(bits);
+    bits = value & 15; // 这个value必须是0~15之间？
+    if (!bits) {
+		printf("return %d\n", 0);
+		return 0;
+	}
+    value = njGetBits(bits); // 如果这里需要读取的值的位数超过之前njShowBits剩余的值，这里会重新读取
     if (value < (1 << (bits - 1)))
         value += ((-1) << bits) + 1;
+	printf("return %d\n", value);
     return value;
 }
 
-NJ_INLINE void njDecodeBlock(nj_component_t* c, unsigned char* out) {
+NJ_INLINE void njDecodeBlock(nj_component_t* c, unsigned char* out) { // 8 x 8
     unsigned char code = 0;
     int value, coef = 0;
     njFillMem(nj.block, 0, sizeof(nj.block));
-    c->dcpred += njGetVLC(&nj.vlctab[c->dctabsel][0], NULL); // DC 0/1 不会和AC重复
+	int dcvlcval = njGetVLC(&nj.vlctab[c->dctabsel][0], NULL); // DC 0/1 不会和AC重复
+	printf("dcvlcval %d\n", dcvlcval);
+    c->dcpred += dcvlcval;
     nj.block[0] = (c->dcpred) * nj.qtab[c->qtsel][0]; // DC // 这里是反量化？
     do {
         value = njGetVLC(&nj.vlctab[c->actabsel][0], &code); // DC 2/3
         if (!code) break;  // EOB
-        if (!(code & 0x0F) && (code != 0xF0)) njThrow(NJ_SYNTAX_ERROR);
+        if (!(code & 0x0F) && (code != 0xF0)) njThrow(NJ_SYNTAX_ERROR); // 这是什么字段？(难道是为了兼容这个过程中可以遇到0xF0这样的数据)
         coef += (code >> 4) + 1; // coefficient 系数
         if (coef > 63) njThrow(NJ_SYNTAX_ERROR);
         nj.block[(int) njZZ[coef]] = value * nj.qtab[c->qtsel][coef]; // AC 这里是反量化？
@@ -692,6 +717,11 @@ NJ_INLINE void njDecodeBlock(nj_component_t* c, unsigned char* out) {
 }
 
 NJ_INLINE void njDecodeScan(void) {
+//	njPrintHT(0);
+//	njPrintHT(2);
+//	njPrintHT(1);
+//	njPrintHT(3);
+
     int i, mbx, mby, sbx, sby;
     int rstcount = nj.rstinterval, nextrst = 0;
     nj_component_t* c;
